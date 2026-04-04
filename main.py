@@ -1,46 +1,50 @@
+
+import copy
+import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from config import UAVConfig
 from data_generation import generate_training_data, generate_random_scenario
 from network import TrajectoryPlannerNetwork
 from trainer import UAVTrainer
 from deployment import UAVDeployment
 
+
 def main():
-    # ── 1. Configuration ─────────────────────────────────────────────────────
     config = UAVConfig()
-    # ── 2. Dataset Generation ────────────────────────────────────────────────
-    # Changed num_samples to 2500
-    dataset    = generate_training_data(config, num_samples=2500)
-    train_size = int(config.train_test_split * len(dataset))
+    config.set_seed()
 
-    train_loader = DataLoader(
-        torch.utils.data.Subset(dataset, range(train_size)),
-        batch_size=config.batch_size, shuffle=True
-    )
-    val_loader = DataLoader(
-        torch.utils.data.Subset(dataset, range(train_size, len(dataset))),
-        batch_size=config.batch_size
-    )
+    dataset = generate_training_data(config, config.dataset_size)
+    train_size = int(len(dataset) * config.train_test_split)
+    val_size = len(dataset) - train_size
+    train_set, val_set = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(config.seed))
+    train_loader = DataLoader(train_set, batch_size=config.batch_size, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=config.batch_size, shuffle=False)
 
-    # ── 3. Model ─────────────────────────────────────────────────────────────
     model = TrajectoryPlannerNetwork(config)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # ── 4. Training ──────────────────────────────────────────────────────────
     trainer = UAVTrainer(config, model)
     trainer.train(train_loader, val_loader)
 
-    # ── 5. Inference & Visualisation ─────────────────────────────────────────
-    deployment    = UAVDeployment(model, config)
-    test_scenario = generate_random_scenario(config)
-    trajectory, power, metrics = deployment.predict(test_scenario)
+    base_scenario = generate_random_scenario(config)
+    deployment = UAVDeployment(model, config)
 
-    print("\nTest Run:")
-    print(f"  Total Distance (Hovering Path): {metrics['total_distance']:.2f} m")
-    print(f"  Average Multi-Node Secrecy Rate: {metrics['avg_secrecy']:.4f} bits/s/Hz")
+    trajectories = {}
+    metrics = {}
+    base_scale = base_scenario['curve_scale']
+    for T, scale in zip(config.figure_times, [0.18, 0.24, 0.30]):
+        scenario = copy.deepcopy(base_scenario)
+        scenario['curve_scale'] = scale
+        traj, power, met = deployment.predict(scenario)
+        trajectories[T] = traj
+        metrics[T] = met
 
-    deployment.visualize_solution(trajectory, test_scenario, metrics)
+    deployment.visualize_solution(trajectories, base_scenario, metrics, config.plot_path)
 
-if __name__ == "__main__":
+    print('Saved model to', config.model_path)
+    print('Saved trajectory figure to', config.plot_path)
+    for T in config.figure_times:
+        print(f"T={T}s | distance={metrics[T]['total_distance']:.2f} m | secrecy={metrics[T]['avg_secrecy']:.2f}")
+
+
+if __name__ == '__main__':
     main()
